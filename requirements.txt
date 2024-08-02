@@ -4,3 +4,4 @@ python-dotenv
 pytz
 streamlit
 schedule
+matplotlib
