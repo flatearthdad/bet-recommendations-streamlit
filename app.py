@@ -1,4 +1,5 @@
 import os
+import sys
 from dotenv import load_dotenv
 import requests
 import pandas as pd
@@ -11,9 +12,17 @@ import schedule
 import time
 import http.client
 import json
+import matplotlib.pyplot as plt
+
+print(f"Python version: {sys.version}")
+print(f"sys.path: {sys.path}")
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Verify that the environment variables are loaded
+print("WAGERGPT_API_KEY:", os.getenv('WAGERGPT_API_KEY'))
+print("RAPIDAPI_KEY:", os.getenv('RAPIDAPI_KEY'))
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -218,23 +227,48 @@ def fetch_odds():
     res = conn.getresponse()
     data = res.read()
     
-    odds_json = json.loads(data.decode("utf-8"))
+    # Debug: Print the raw data received
+    print("Raw data received from API:\n", data.decode("utf-8"))
+
+    try:
+        odds_json = json.loads(data.decode("utf-8"))
+        # Debug: Print the parsed JSON
+        print("Parsed JSON:\n", json.dumps(odds_json, indent=2))
+    except json.JSONDecodeError as e:
+        st.error(f"Error parsing JSON: {e}")
+        return None
     
-    # Create a DataFrame from the JSON data
+    # Ensure the data is a dictionary
+    if not isinstance(odds_json, dict):
+        st.error("Unexpected data format: JSON root is not a dictionary")
+        return None
+    
+    # Extract events from the JSON data
     events = []
-    for event in odds_json:
+    for event in odds_json.get('events', []):
+        # Debug: Print the event data structure
+        print("Event data structure:\n", event)
+        if 'bookmakers' not in event:
+            st.error("Missing 'bookmakers' in event data")
+            return None
         for bookmaker in event['bookmakers']:
+            if 'markets' not in bookmaker:
+                st.error("Missing 'markets' in bookmaker data")
+                return None
             for market in bookmaker['markets']:
+                if 'outcomes' not in market:
+                    st.error("Missing 'outcomes' in market data")
+                    return None
                 for outcome in market['outcomes']:
                     events.append([
-                        event['commence_time'],
-                        event['sport_key'],
-                        event['home_team'],
-                        event['away_team'],
-                        bookmaker['title'],
-                        market['key'],
-                        outcome['name'],
-                        outcome['price']
+                        event.get('commence_time', 'N/A'),
+                        event.get('sport_key', 'N/A'),
+                        event.get('home_team', 'N/A'),
+                        event.get('away_team', 'N/A'),
+                        bookmaker.get('title', 'N/A'),
+                        market.get('key', 'N/A'),
+                        outcome.get('name', 'N/A'),
+                        outcome.get('price', 0)
                     ])
     
     df = pd.DataFrame(events, columns=[
@@ -270,17 +304,40 @@ def load_historical_data():
     return None
 
 def display_historical_charts(historical_data):
+    # Debug: Print the first few rows of the DataFrame and its columns
+    print("Historical Data Head:\n", historical_data.head())
+    print("Historical Data Columns:\n", historical_data.columns)
+    
+    # Ensure the 'Team' column exists
+    if 'Team' not in historical_data.columns:
+        st.error("The 'Team' column is missing in the historical data.")
+        return
+    
     last_24_hours = datetime.now() - timedelta(hours=24)
     historical_data['Timestamp'] = pd.to_datetime(historical_data['Timestamp'])
     recent_data = historical_data[historical_data['Timestamp'] >= last_24_hours]
 
     st.subheader("24-hour Change in Expected Value")
     ev_chart = recent_data.pivot(index='Timestamp', columns='Team', values='EV').fillna(0)
-    st.line_chart(ev_chart)
+    plt.figure(figsize=(10, 6))
+    for column in ev_chart:
+        plt.plot(ev_chart.index, ev_chart[column], label=column)
+    plt.title('24-hour Change in Expected Value')
+    plt.xlabel('Timestamp')
+    plt.ylabel('Expected Value')
+    plt.legend()
+    st.pyplot(plt)
 
     st.subheader("24-hour Change in Recommended Bet Size")
     bet_size_chart = recent_data.pivot(index='Timestamp', columns='Team', values='Recommended Bet Size').fillna(0)
-    st.line_chart(bet_size_chart)
+    plt.figure(figsize=(10, 6))
+    for column in bet_size_chart:
+        plt.plot(bet_size_chart.index, bet_size_chart[column], label=column)
+    plt.title('24-hour Change in Recommended Bet Size')
+    plt.xlabel('Timestamp')
+    plt.ylabel('Recommended Bet Size')
+    plt.legend()
+    st.pyplot(plt)
 
 # Predictions tab
 with tabs[0]:
@@ -303,8 +360,8 @@ with tabs[2]:
 with tabs[3]:
     display_history()
 
-st.sidebar.info("Developed by Your Company Name")
-st.sidebar.text("Version 2.1")
+st.sidebar.info("Developed by JD Powered by WagerGPT, PyBaseball & Odds API")
+st.sidebar.text("Version 1.2")
 
 # Scheduling functionality
 def scheduled_odds_fetch():
