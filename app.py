@@ -1,4 +1,5 @@
 import os
+from dotenv import load_dotenv
 import requests
 import pandas as pd
 import re
@@ -11,18 +12,21 @@ import time
 import http.client
 import json
 
+# Load environment variables from .env file
+load_dotenv()
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Configuration
 WAGERGPT_API_URL = "http://api.wagergpt.co/daily-picks"
-API_KEY = 'df71fd3fcfc76f64d35aa9fbf9b125f7'
+API_KEY = os.getenv('WAGERGPT_API_KEY')
 SPORT = 'baseball_mlb'
 REGIONS = 'us'  # Multiple regions can be specified if comma delimited
 MARKETS = 'h2h,spreads'  # Multiple markets can be specified if comma delimited
 ODDS_FORMAT = 'decimal'
 DATE_FORMAT = 'iso'
-RAPIDAPI_KEY = "91cc01cc00msh801391a9ed27689p1cde51jsn603bd39ccf90"
+RAPIDAPI_KEY = os.getenv('RAPIDAPI_KEY')
 RAPIDAPI_HOST = "odds.p.rapidapi.com"
 HISTORICAL_DATA_FILE = "odds_data.csv"
 
@@ -299,8 +303,8 @@ with tabs[2]:
 with tabs[3]:
     display_history()
 
-st.sidebar.info("Developed by JD Powered by WagerGPT, PyBaseball & Odds API")
-st.sidebar.text("Version 1.2")
+st.sidebar.info("Developed by Your Company Name")
+st.sidebar.text("Version 2.1")
 
 # Scheduling functionality
 def scheduled_odds_fetch():
