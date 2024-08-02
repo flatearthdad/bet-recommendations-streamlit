@@ -1,4 +1,5 @@
 import os
+import sys
 from dotenv import load_dotenv
 import requests
 import pandas as pd
@@ -12,8 +13,15 @@ import time
 import http.client
 import json
 
+print(f"Python version: {sys.version}")
+print(f"sys.path: {sys.path}")
+
 # Load environment variables from .env file
 load_dotenv()
+
+# Verify that the environment variables are loaded
+print("WAGERGPT_API_KEY:", os.getenv('WAGERGPT_API_KEY'))
+print("RAPIDAPI_KEY:", os.getenv('RAPIDAPI_KEY'))
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -270,6 +278,15 @@ def load_historical_data():
     return None
 
 def display_historical_charts(historical_data):
+    # Debug: Print the first few rows of the DataFrame and its columns
+    print("Historical Data Head:\n", historical_data.head())
+    print("Historical Data Columns:\n", historical_data.columns)
+    
+    # Ensure the 'Team' column exists
+    if 'Team' not in historical_data.columns:
+        st.error("The 'Team' column is missing in the historical data.")
+        return
+    
     last_24_hours = datetime.now() - timedelta(hours=24)
     historical_data['Timestamp'] = pd.to_datetime(historical_data['Timestamp'])
     recent_data = historical_data[historical_data['Timestamp'] >= last_24_hours]
@@ -303,8 +320,8 @@ with tabs[2]:
 with tabs[3]:
     display_history()
 
-st.sidebar.info("Developed by Your Company Name")
-st.sidebar.text("Version 2.1")
+st.sidebar.info("Developed by JD Powered by WagerGPT, PyBaseball & Odds API")
+st.sidebar.text("Version 1.2")
 
 # Scheduling functionality
 def scheduled_odds_fetch():
