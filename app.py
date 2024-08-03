@@ -1,49 +1,24 @@
 import os
-import sys
 from dotenv import load_dotenv
 import requests
 import pandas as pd
 import re
-from datetime import datetime, timedelta
-import pytz
+from datetime import datetime
 import logging
 import streamlit as st
-import schedule
-import time
-import http.client
-import json
-import matplotlib.pyplot as plt
-
-print(f"Python version: {sys.version}")
-print(f"sys.path: {sys.path}")
+import plotly.express as px
+import plotly.graph_objects as go
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Load environment variables from .env file
 load_dotenv()
 
-# Verify that the environment variables are loaded
-print("WAGERGPT_API_KEY:", os.getenv('WAGERGPT_API_KEY'))
-print("RAPIDAPI_KEY:", os.getenv('RAPIDAPI_KEY'))
+# Import configuration settings
+from config import *
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# Configuration
-WAGERGPT_API_URL = "http://api.wagergpt.co/daily-picks"
-API_KEY = os.getenv('WAGERGPT_API_KEY')
-SPORT = 'baseball_mlb'
-REGIONS = 'us'  # Multiple regions can be specified if comma delimited
-MARKETS = 'h2h,spreads'  # Multiple markets can be specified if comma delimited
-ODDS_FORMAT = 'decimal'
-DATE_FORMAT = 'iso'
-RAPIDAPI_KEY = os.getenv('RAPIDAPI_KEY')
-RAPIDAPI_HOST = "odds.p.rapidapi.com"
-HISTORICAL_DATA_FILE = "odds_data.csv"
-
-KELLY_FRACTIONS = {
-    "Full Kelly": 1.0,
-    "Half Kelly": 0.5,
-    "Quarter Kelly": 0.25
-}
 
 # Initialize session state variables
 if 'df_bets' not in st.session_state:
@@ -64,31 +39,99 @@ if 'win_rate' not in st.session_state:
 if 'team_edges' not in st.session_state:
     st.session_state.team_edges = {}
 
-if 'api_key' not in st.session_state:
-    st.session_state.api_key = ""
-
 # Streamlit App
 st.set_page_config(page_title="WagerGPT Betting Recommendations", layout="wide")
+
+# Custom CSS for dark theme and improved visual appeal
+st.markdown("""
+    <style>
+    .stApp {
+        background-color: #1E1E1E;
+        color: #FFFFFF;
+    }
+    .stButton>button {
+        background-color: #4CAF50;
+        color: white;
+    }
+    .stDataFrame {
+        background-color: #2D2D2D;
+        padding: 10px;
+        border-radius: 5px;
+        box-shadow: 0 2px 4px rgba(0,0,0,.1);
+    }
+    .stSlider>div>div>div>div {
+        background-color: #4CAF50;
+    }
+    .stTextInput>div>div>input {
+        background-color: #2D2D2D;
+        color: #FFFFFF;
+    }
+    .stSelectbox>div>div>select {
+        background-color: #2D2D2D;
+        color: #FFFFFF;
+    }
+    .stTab {
+        background-color: #2D2D2D;
+        color: #FFFFFF;
+    }
+    .stTab[data-baseweb="tab-list"] {
+        gap: 2px;
+    }
+    .stTab[data-baseweb="tab"] {
+        height: 50px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+    }
+    .stTab[aria-selected="true"] {
+        background-color: #4CAF50;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
 # Sidebar
 with st.sidebar:
     st.title("Settings")
-    st.session_state.api_key = st.text_input("WagerGPT API Key", type="password", value=st.session_state.api_key)
+    wagergpt_api_key = st.text_input("WagerGPT API Key", type="password")
+    odds_api_key = st.text_input("The Odds API Key", type="password")
     st.session_state.bankroll = st.number_input("Bankroll ($)", min_value=100, value=st.session_state.bankroll, step=100)
     st.session_state.kelly_type = st.selectbox("Kelly Criterion", list(KELLY_FRACTIONS.keys()), index=list(KELLY_FRACTIONS.keys()).index(st.session_state.kelly_type))
     st.session_state.win_rate = st.slider("Default Win Rate", min_value=0.0, max_value=1.0, value=st.session_state.win_rate, step=0.01)
+
+# Check API keys
+if not wagergpt_api_key or not odds_api_key:
+    st.error("Please enter your API keys in the sidebar.")
+else:
+    # Debugging: Print API keys (remove or comment out in production)
+    print(f"WagerGPT API Key: {wagergpt_api_key}")
+    print(f"The Odds API Key: {odds_api_key}")
+
+    # Store API keys in session state
+    st.session_state.wagergpt_api_key = wagergpt_api_key
+    st.session_state.odds_api_key = odds_api_key
 
 # Main content
 st.title("WagerGPT Betting Recommendations")
 
 # Navigation
-tabs = st.tabs(["Predictions", "Latest Odds", "Analysis", "History"])
+tabs = st.tabs(["Predictions", "Latest Odds", "Analysis"])
+
+# Setup a session for requests with retry logic
+session = requests.Session()
+retry = Retry(
+    total=5,
+    backoff_factor=1,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["HEAD", "GET", "OPTIONS"]
+)
+adapter = HTTPAdapter(max_retries=retry)
+session.mount("https://", adapter)
+session.mount("http://", adapter)
 
 @st.cache_data
 def fetch_daily_picks(access_token):
     params = {'access_token': access_token}
     try:
-        response = requests.get(WAGERGPT_API_URL, params=params)
+        response = session.get(WAGERGPT_API_URL, params=params)
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
         logging.error(f"WagerGPT API request failed: {e}")
@@ -96,11 +139,11 @@ def fetch_daily_picks(access_token):
     return response.json()
 
 def get_bet_recommendations():
-    if not st.session_state.api_key:
+    if not st.session_state.wagergpt_api_key:
         st.error("Please enter your WagerGPT API key in the sidebar.")
         return None
 
-    daily_picks = fetch_daily_picks(st.session_state.api_key)
+    daily_picks = fetch_daily_picks(st.session_state.wagergpt_api_key)
     
     if daily_picks is None:
         st.error("Failed to fetch data from WagerGPT API. Please check your API key and try again.")
@@ -121,7 +164,6 @@ def get_bet_recommendations():
             "Sport": "MLB",
             "Team": team.strip(),
             "Spread": float(point_spread),
-            "Bet Recommendation": f"{team.strip()} {point_spread}",
             "Odds": float(odds),
             "WinRate": st.session_state.win_rate,
             "Team Edge (%)": st.session_state.team_edges.get(team.strip(), 0.0)
@@ -135,10 +177,35 @@ def get_bet_recommendations():
 
     st.session_state.df_bets = df_bets
 
+    # Ensure 'EV' column is created before using it
+    calculate_ev_column()
+
+def calculate_ev_column():
+    if st.session_state.df_bets is not None:
+        st.session_state.df_bets['Adjusted Win Rate'] = st.session_state.df_bets.apply(lambda x: round(x['WinRate'] + x['Team Edge (%)'], 4), axis=1)
+        
+        def calculate_ev(row):
+            return round((row['Adjusted Win Rate'] * (row['Odds'] - 1) - (1 - row['Adjusted Win Rate'])), 4)
+
+        st.session_state.df_bets['EV'] = st.session_state.df_bets.apply(calculate_ev, axis=1)
+
+        kelly_fraction = KELLY_FRACTIONS[st.session_state.kelly_type]
+
+        st.session_state.df_bets['Recommended Bet Size'] = st.session_state.df_bets.apply(
+            lambda x: round(kelly_fraction * st.session_state.bankroll * x['EV'] / x['Odds'], 4), axis=1)
+
+        max_daily_risk = 0.5 * st.session_state.bankroll
+        if st.session_state.df_bets['Recommended Bet Size'].sum() > max_daily_risk:
+            st.session_state.df_bets['Recommended Bet Size'] = round(
+                (st.session_state.df_bets['Recommended Bet Size'] / st.session_state.df_bets['Recommended Bet Size'].sum()) * max_daily_risk, 4)
+
+        # Update the dynamic table
+        st.session_state.df_dynamic_bets = st.session_state.df_bets[['Team', 'Spread', 'Odds', 'WinRate', 'Team Edge (%)', 'Adjusted Win Rate', 'EV', 'Recommended Bet Size']]
+
 def update_team_edges():
+    st.subheader("Team Edge Adjustments")
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader("Team Edge Adjustments")
         for i, row in st.session_state.df_bets.iloc[:len(st.session_state.df_bets)//2].iterrows():
             team = row['Team']
             unique_key = f"{team}_{i}"
@@ -156,22 +223,7 @@ def update_team_edges():
             st.session_state.team_edges[team] = edge / 100
             st.session_state.df_bets.at[i, 'Team Edge (%)'] = edge / 100
     
-    st.session_state.df_bets['Adjusted Win Rate'] = st.session_state.df_bets.apply(lambda x: round(x['WinRate'] + x['Team Edge (%)'], 4), axis=1)
-    
-    def calculate_ev(row):
-        return round((row['Adjusted Win Rate'] * (row['Odds'] - 1) - (1 - row['Adjusted Win Rate'])), 4)
-
-    st.session_state.df_bets['EV'] = st.session_state.df_bets.apply(calculate_ev, axis=1)
-
-    kelly_fraction = KELLY_FRACTIONS[st.session_state.kelly_type]
-
-    st.session_state.df_bets['Recommended Bet Size'] = st.session_state.df_bets.apply(
-        lambda x: round(kelly_fraction * st.session_state.bankroll * x['EV'] / x['Odds'], 4), axis=1)
-
-    max_daily_risk = 0.5 * st.session_state.bankroll
-    if st.session_state.df_bets['Recommended Bet Size'].sum() > max_daily_risk:
-        st.session_state.df_bets['Recommended Bet Size'] = round(
-            (st.session_state.df_bets['Recommended Bet Size'] / st.session_state.df_bets['Recommended Bet Size'].sum()) * max_daily_risk, 4)
+    calculate_ev_column()
 
 def display_predictions():
     if st.session_state.df_bets is not None:
@@ -181,205 +233,201 @@ def display_predictions():
             "WinRate": "{:.2%}", 
             "Team Edge (%)": "{:.2%}", 
             "Adjusted Win Rate": "{:.2%}", 
-            "EV": "{:.4f}",  # Displayed as decimal
+            "EV": "{:.4f}",
             "Recommended Bet Size": "${:.2f}"
         }).background_gradient(subset=['EV'], cmap='RdYlGn'))
+
+        # Improved bet size distribution graphic as a bar chart
+        fig = px.bar(st.session_state.df_bets, x='Team', y='Recommended Bet Size', color='Team', title='Bet Size Distribution by Team')
+        fig.update_layout(
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font_color='#FFFFFF',
+            xaxis_title='Team',
+            yaxis_title='Recommended Bet Size ($)'
+        )
+        st.plotly_chart(fig)
     else:
         st.warning("No betting recommendations available. Please fetch the data first.")
 
+def fetch_odds():
+    if not st.session_state.odds_api_key:
+        st.error("Please enter your The Odds API key in the sidebar.")
+        return None
+
+    params = {
+        'apiKey': st.session_state.odds_api_key,
+        'regions': REGIONS,
+        'markets': MARKETS,
+        'oddsFormat': ODDS_FORMAT
+    }
+    
+    try:
+        response = session.get(ODDS_API_URL, params=params)
+        response.raise_for_status()
+        odds_json = response.json()
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error fetching odds data: {e}")
+        return None
+    except json.JSONDecodeError as e:
+        st.error(f"Error parsing JSON: {e}")
+        return None
+    
+    events = []
+    for event in odds_json:
+        home_team = event['home_team']
+        away_team = event['away_team']
+        commence_time = event['commence_time']
+        
+        for bookmaker in event['bookmakers']:
+            for market in bookmaker['markets']:
+                for outcome in market['outcomes']:
+                    events.append([
+                        event['commence_time'],
+                        event['home_team'],
+                        event['away_team'],
+                        bookmaker['title'],
+                        market['key'],
+                        outcome['name'],
+                        outcome.get('price', 'N/A'),
+                        outcome.get('point', 'N/A')
+                    ])
+    
+    df = pd.DataFrame(events, columns=[
+        'Commence Time', 'Home Team', 'Away Team',
+        'Bookmaker', 'Market', 'Team', 'Odds', 'Point'
+    ])
+    
+    df['Commence Time'] = pd.to_datetime(df['Commence Time'])
+    
+    return df
+
+def find_best_odds():
+    if st.session_state.df_odds is not None and st.session_state.df_bets is not None:
+        best_odds = []
+        for _, bet in st.session_state.df_bets.iterrows():
+            team = bet['Team']
+            odds_data = st.session_state.df_odds[st.session_state.df_odds['Team'] == team]
+            best_odd = odds_data.loc[odds_data['Odds'].idxmax()]
+            best_odds.append({
+                'Team': team,
+                'Best Bookmaker': best_odd['Bookmaker'],
+                'Best Odds': best_odd['Odds']
+            })
+        return pd.DataFrame(best_odds)
+    else:
+        st.warning("No odds or bets data available to find best odds.")
+        return None
+
 def display_analysis():
     if st.session_state.df_bets is not None:
+        # Display dynamic table
+        st.subheader("Dynamic Bet Sizing Table")
+        if 'df_dynamic_bets' in st.session_state:
+            st.dataframe(st.session_state.df_dynamic_bets.style.format({
+                "Spread": "{:.2f}", 
+                "Odds": "{:.2f}", 
+                "WinRate": "{:.2%}", 
+                "Team Edge (%)": "{:.2%}", 
+                "Adjusted Win Rate": "{:.2%}", 
+                "EV": "{:.4f}",
+                "Recommended Bet Size": "${:.2f}"
+            }).background_gradient(subset=['EV'], cmap='RdYlGn'))
+
+        update_team_edges()
+
         col1, col2 = st.columns(2)
         
         with col1:
             st.subheader("Expected Value Distribution")
-            ev_chart = st.session_state.df_bets[['Team', 'EV']].set_index('Team')
-            st.bar_chart(ev_chart)
+            fig = px.bar(st.session_state.df_bets, x='Team', y='EV', title='Expected Value by Team')
+            fig.update_layout(
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                font_color='#FFFFFF'
+            )
+            st.plotly_chart(fig)
         
         with col2:
             st.subheader("Bet Size Distribution")
-            bet_size_chart = st.session_state.df_bets[['Team', 'Recommended Bet Size']].set_index('Team')
-            st.bar_chart(bet_size_chart)
+            fig = px.bar(st.session_state.df_bets, x='Team', y='Recommended Bet Size', title='Recommended Bet Size by Team')
+            fig.update_layout(
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                font_color='#FFFFFF'
+            )
+            st.plotly_chart(fig)
         
         st.subheader("Summary Statistics")
         summary_stats = st.session_state.df_bets[['EV', 'Recommended Bet Size']].describe()
         st.dataframe(summary_stats.style.format("{:.4f}"))
 
-        # Load and display historical data
-        historical_data = load_historical_data()
-        if historical_data is not None:
-            display_historical_charts(historical_data)
+        # Add a heat map for correlations
+        correlation_matrix = st.session_state.df_bets[['Spread', 'Odds', 'WinRate', 'Team Edge (%)', 'EV', 'Recommended Bet Size']].corr()
+        fig = go.Figure(data=go.Heatmap(
+            z=correlation_matrix.values,
+            x=correlation_matrix.columns,
+            y=correlation_matrix.columns,
+            colorscale='RdBu'
+        ))
+        fig.update_layout(
+            title='Correlation Heatmap',
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font_color='#FFFFFF'
+        )
+        st.plotly_chart(fig)
     else:
         st.warning("No data available for analysis. Please fetch predictions first.")
-
-def display_history():
-    st.info("Betting history feature coming soon!")
-
-def fetch_odds():
-    conn = http.client.HTTPSConnection(RAPIDAPI_HOST)
-    headers = {
-        'x-rapidapi-key': RAPIDAPI_KEY,
-        'x-rapidapi-host': RAPIDAPI_HOST
-    }
-    
-    conn.request("GET", f"/v4/sports/{SPORT}/odds?regions={REGIONS}&oddsFormat={ODDS_FORMAT}&markets={MARKETS}&dateFormat={DATE_FORMAT}", headers=headers)
-    
-    res = conn.getresponse()
-    data = res.read()
-    
-    # Debug: Print the raw data received
-    print("Raw data received from API:\n", data.decode("utf-8"))
-
-    try:
-        odds_json = json.loads(data.decode("utf-8"))
-        # Debug: Print the parsed JSON
-        print("Parsed JSON:\n", json.dumps(odds_json, indent=2))
-    except json.JSONDecodeError as e:
-        st.error(f"Error parsing JSON: {e}")
-        return None
-    
-    # Ensure the data is a dictionary
-    if not isinstance(odds_json, dict):
-        st.error("Unexpected data format: JSON root is not a dictionary")
-        return None
-    
-    # Extract events from the JSON data
-    events = []
-    for event in odds_json.get('events', []):
-        # Debug: Print the event data structure
-        print("Event data structure:\n", event)
-        if 'bookmakers' not in event:
-            st.error("Missing 'bookmakers' in event data")
-            return None
-        for bookmaker in event['bookmakers']:
-            if 'markets' not in bookmaker:
-                st.error("Missing 'markets' in bookmaker data")
-                return None
-            for market in bookmaker['markets']:
-                if 'outcomes' not in market:
-                    st.error("Missing 'outcomes' in market data")
-                    return None
-                for outcome in market['outcomes']:
-                    events.append([
-                        event.get('commence_time', 'N/A'),
-                        event.get('sport_key', 'N/A'),
-                        event.get('home_team', 'N/A'),
-                        event.get('away_team', 'N/A'),
-                        bookmaker.get('title', 'N/A'),
-                        market.get('key', 'N/A'),
-                        outcome.get('name', 'N/A'),
-                        outcome.get('price', 0)
-                    ])
-    
-    df = pd.DataFrame(events, columns=[
-        'Commence Time', 'Sport Key', 'Home Team', 'Away Team',
-        'Bookmaker', 'Market', 'Outcome', 'Odds'
-    ])
-    
-    df['Commence Time'] = pd.to_datetime(df['Commence Time'])
-    df['Timestamp'] = datetime.now()
-    
-    # Highlight the most favorable odds (lowest odds)
-    idx = df.groupby(['Home Team', 'Away Team', 'Market'])['Odds'].transform(min) == df['Odds']
-    favorable_odds_df = df[idx]
-    
-    return favorable_odds_df
 
 def display_odds():
     st.subheader("Latest Odds")
     if st.button("Fetch Latest Odds"):
         with st.spinner("Fetching latest odds..."):
             st.session_state.df_odds = fetch_odds()
-    
-    if st.session_state.df_odds is not None:
-        st.dataframe(st.session_state.df_odds.style.format({
-            "Odds": "{:.2f}"
-        }).background_gradient(subset=['Odds'], cmap='RdYlGn', low=0.5, high=0))
+    if st.session_state.df_odds is not None and not st.session_state.df_odds.empty:
+        st.dataframe(
+            st.session_state.df_odds.style.format({
+                "Odds": lambda x: f"{x:+d}" if isinstance(x, (int, float)) else x,
+                "Point": lambda x: f"{x:.1f}" if isinstance(x, (int, float)) else x
+            }).background_gradient(subset=['Odds'], cmap='RdYlGn', low=0.5, high=0)
+        )
+
+        # Add a bar chart for odds comparison
+        fig = px.bar(
+            st.session_state.df_odds,
+            x='Team',
+            y='Odds',
+            color='Bookmaker',
+            title='Odds Comparison by Bookmaker',
+            barmode='group'
+        )
+        fig.update_layout(
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font_color='#FFFFFF',
+            xaxis_title='Team',
+            yaxis_title='Odds'
+        )
+        st.plotly_chart(fig)
+
+        st.subheader("Best Odds by Bookmaker")
+        best_odds_df = find_best_odds()
+        if best_odds_df is not None:
+            st.dataframe(best_odds_df)
     else:
         st.warning("No odds data available. Please fetch the latest odds.")
 
-def load_historical_data():
-    if os.path.exists(HISTORICAL_DATA_FILE):
-        return pd.read_csv(HISTORICAL_DATA_FILE)
-    return None
-
-def display_historical_charts(historical_data):
-    # Debug: Print the first few rows of the DataFrame and its columns
-    print("Historical Data Head:\n", historical_data.head())
-    print("Historical Data Columns:\n", historical_data.columns)
-    
-    # Ensure the 'Team' column exists
-    if 'Team' not in historical_data.columns:
-        st.error("The 'Team' column is missing in the historical data.")
-        return
-    
-    last_24_hours = datetime.now() - timedelta(hours=24)
-    historical_data['Timestamp'] = pd.to_datetime(historical_data['Timestamp'])
-    recent_data = historical_data[historical_data['Timestamp'] >= last_24_hours]
-
-    st.subheader("24-hour Change in Expected Value")
-    ev_chart = recent_data.pivot(index='Timestamp', columns='Team', values='EV').fillna(0)
-    plt.figure(figsize=(10, 6))
-    for column in ev_chart:
-        plt.plot(ev_chart.index, ev_chart[column], label=column)
-    plt.title('24-hour Change in Expected Value')
-    plt.xlabel('Timestamp')
-    plt.ylabel('Expected Value')
-    plt.legend()
-    st.pyplot(plt)
-
-    st.subheader("24-hour Change in Recommended Bet Size")
-    bet_size_chart = recent_data.pivot(index='Timestamp', columns='Team', values='Recommended Bet Size').fillna(0)
-    plt.figure(figsize=(10, 6))
-    for column in bet_size_chart:
-        plt.plot(bet_size_chart.index, bet_size_chart[column], label=column)
-    plt.title('24-hour Change in Recommended Bet Size')
-    plt.xlabel('Timestamp')
-    plt.ylabel('Recommended Bet Size')
-    plt.legend()
-    st.pyplot(plt)
-
-# Predictions tab
+# Fetch and display data
 with tabs[0]:
-    if st.button("Fetch Predictions"):
-        get_bet_recommendations()
-    
-    if st.session_state.df_bets is not None:
-        update_team_edges()
-        display_predictions()
+    st.subheader("Betting Predictions")
+    if st.button("Fetch Betting Predictions"):
+        with st.spinner("Fetching predictions..."):
+            get_bet_recommendations()
+    display_predictions()
 
-# Latest Odds tab
 with tabs[1]:
     display_odds()
 
-# Analysis tab
 with tabs[2]:
     display_analysis()
-
-# History tab
-with tabs[3]:
-    display_history()
-
-st.sidebar.info("Developed by JD Powered by WagerGPT, PyBaseball & Odds API")
-st.sidebar.text("Version 1.2")
-
-# Scheduling functionality
-def scheduled_odds_fetch():
-    odds_df = fetch_odds()
-    if odds_df is not None:
-        odds_df.to_csv(HISTORICAL_DATA_FILE, mode='a', header=not os.path.exists(HISTORICAL_DATA_FILE), index=False)
-    st.experimental_rerun()
-
-def schedule_jobs():
-    pst = pytz.timezone('America/Los_Angeles')
-    times = ["06:00", "09:00", "12:00", "15:00"]
-    for time_str in times:
-        schedule_time = datetime.strptime(time_str, "%H:%M").replace(tzinfo=pst)
-        schedule.every().day.at(schedule_time.strftime("%H:%M")).do(scheduled_odds_fetch)
-
-if __name__ == "__main__":
-    schedule_jobs()
-
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
